@@ -1,48 +1,50 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 
 import argparse
 import json
 import os
 import re
 
+import click
 from dateutil.parser import parse
 from tabulate import tabulate
 
 """ groups service client """
 from googleapiclient.discovery import build
-from google.oauth2 import service_account
-from apiclient.discovery import build
 from httplib2 import Http
-from urllib.parse import urlencode
+from six.moves.urllib.parse import urlencode
 from oauth2client import file, client, tools
 
 
 # Cloud identity groups api scope
 SCOPES = ["https://www.googleapis.com/auth/cloud-identity.groups"]
-SERVICE_ACCOUNT_FILE = "{}/client_secrets_service_account.json".format(
-                            os.path.dirname(os.path.realpath(__file__))
-                        )
 API_KEY_FILE = "{}/api_key.txt".format(
                             os.path.dirname(os.path.realpath(__file__))
                         )
+CLIENT_SECRET_OAUTH = "{}/client_secret_oauth.json".format(
+                            os.path.dirname(os.path.realpath(__file__))
+                        )
+TOKEN = "{}/token.json".format(
+                            os.path.dirname(os.path.realpath(__file__))
+                        )
 
-def build_service(credential_path, client_secret_path):
+def build_service():
     """ Build service object to make calls to the Cloud Identity API using its
         Discovery URL """
     if(not os.path.exists(API_KEY_FILE)):
         exit("Please create a file with your API key at {}".format(API_KEY_FILE))
+    if(not os.path.exists(CLIENT_SECRET_OAUTH)):
+        exit("Please download your Oauth client file (client_secret_oauth.json).")
+    if(not os.path.exists(TOKEN)):
+        exit("Please run login.py to set up authentication")
 
     # store the API key
     with open(API_KEY_FILE) as key_file:
         api_key = key_file.read()
 
-    # get the token if it exists
-    # else start the oauth flow to get the token and save it
-    store = file.Storage('token.json')
+    # get the token if it exists and rely on login.py to create token.json
+    store = file.Storage(TOKEN)
     credentials = store.get()
-    if not credentials or credentials.invalid:
-        flow = client.flow_from_clientsecrets('client_secret_oauth.json', SCOPES)
-        credentials = tools.run_flow(flow, store)
 
     service_name = "cloudidentity.googleapis.com"
     api_name = "cloudidentity"
@@ -66,8 +68,12 @@ def build_service(credential_path, client_secret_path):
               )
     return service
 
-
-def groups_create(service, customer_id, key, display_name='', description=''):
+@click.command('groups.create')
+@click.option('--customer_id', required=True, help='Your customer ID.')
+@click.option('--key', required=True, help=('Unique key for the group in email address format.'))
+@click.option('--display_name', required=False, help=('A display name for the group.'))
+@click.option('--description', required=False, help=('A description for the group.'))
+def groups_create(customer_id, key, display_name, description):
     """Create a group.
     Args:
         service: service client.
@@ -77,25 +83,30 @@ def groups_create(service, customer_id, key, display_name='', description=''):
         display_name: a display name for the group
     Returns: the created group
     """
-    group = {
+    service = build_service()
+    groupDef = {
         "parent": "customerId/{}".format(customer_id),
         "groupKey": {"id": key},
-        "description": str(description),
-        "displayName": str(display_name),
+        "description": description,
+        "displayName": display_name,
         # the discussion_forum label is the only label currently supported
         "labels": {"system/groups/discussion_forum": ""}
     }
 
     try:
-        request = service.groups().create(body=group)
+        request = service.groups().create(body=groupDef)
         request.uri += "&initialGroupConfig=WITH_INITIAL_OWNER"
         response = request.execute()
-        group = groups_get(service, name=response['response']['name'])
-        return group
+        # fetch the newly created group
+        group = [service.groups().get(name=response['response']['name']).execute()]
+        render(group)
     except Exception as e:
-        return e
+        render(e)
 
-def groups_get(service, name=None, key=None):
+@click.command('groups.get')
+@click.option('--name', required=False, help='The unique name identifier for the group. (This is not the group\'s display name)')
+@click.option('--key', required=False, help=('Unique key for the group in email address format.'))
+def groups_get(name, key):
     """Get a group by either name or key.
 
     Args:
@@ -104,9 +115,14 @@ def groups_get(service, name=None, key=None):
         key: id of the group in email format
     Returns: Group resource if found.
     """
+    if(name is None and key is None):
+        render(Exception('Either --name or --key are required.'))
+        return
+
+    service = build_service()
     try:
         # if id is passed we then we have to fetch the name
-        if(id is not None):
+        if(name is None and key is not None):
             param = "&groupKey.id=" + key
             lookup_group_name_request = service.groups().lookup()
             lookup_group_name_request.uri += param
@@ -114,11 +130,14 @@ def groups_get(service, name=None, key=None):
             name = lookup_group_name_response.get("name")
 
         response = [service.groups().get(name=name).execute()]
-        return response
+        render(response)
     except Exception as e:
-        return e
+        render(e)
 
-def groups_list(service, customer_id, page_size, view):
+@click.command('groups.list')
+@click.option('--customer_id', required=True, help='Your customer ID.')
+@click.option('--page_size', required=False, default=10, help=('Number of groups to return.'))
+def groups_list(customer_id, page_size):
     """List groups.
 
     Args:
@@ -128,22 +147,26 @@ def groups_list(service, customer_id, page_size, view):
         view: FULL / BASIC view of groups.
     Returns: List of groups.
     """
+    service = build_service()
     search_query = urlencode({
             # this gets all groups in the customer the caller has permission to view with the discussion_forum label
             "query": "parent=='customerId/{}' && 'system/groups/discussion_forum' in labels".format(customer_id),
             "pageSize": page_size,
-            "view": view
+            "view": "BASIC"
         }
     )
     try:
         search_groups_request = service.groups().search()
         search_groups_request.uri += "&" + search_query
         groups = search_groups_request.execute()['groups']
-        return groups
+        render(groups)
     except Exception as e:
-        return e
+        render(e)
 
-def memberships_list(service, name=None):
+@click.command('memberships.list')
+@click.option('--name', required=True, help='The unique name identifier for the group. (This is not the group\'s display name)')
+#@click.option('--key', required=False, help=('Unique key for the group in email address format.'))
+def memberships_list(name):
     """List memberships of a group.
 
     Args:
@@ -151,6 +174,7 @@ def memberships_list(service, name=None):
         name: name of the group (i.e. groups/abcdefghijklmnop)
     Returns: List of groups.
     """
+    service = build_service()
     try:
         members_request = service.groups().memberships().list(parent=name)
         members_request.uri += "&view=FULL"
@@ -159,11 +183,13 @@ def memberships_list(service, name=None):
         #   so we insert it for display purposes if it's not there
         if('expireTime' not in members_response[0].keys()):
             members_response[0]['expireTime'] = ''
-        return members_response
+        render(members_response)
     except Exception as e:
-        return e
+        render(e)
 
-def memberships_get(service, name=None):
+@click.command('memberships.get')
+@click.option('--name', required=True, help='The unique name identifier for the membership. (This is not the member\'s display name)')
+def memberships_get(name):
     """Get a membership.
 
     Args:
@@ -171,14 +197,19 @@ def memberships_get(service, name=None):
         name: name of the membership (i.e. groups/abcdefghijklmnop/memberships/1234567890)
     Returns: Membership resource.
     """
+    service = build_service()
     try:
         response = service.groups().memberships().get(
                 name=name).execute()
-        return [response]
+        render([response])
     except Exception as e:
-        return e
+        render(e)
 
-def memberships_create(service, name=None, member=None, expiry=None):
+@click.command('memberships.create')
+@click.option('--name', required=True, help='The unique name identifier for the group. (This is not the group\'s display name)')
+@click.option('--member', required=True, help='The email address of the member to add. (Member resource must already exist)')
+@click.option('--expiry', required=False, help='Expiration date/time for the membership as either a Unix timestamp or date string in the format "Nov 30 2019 23:59:59".')
+def memberships_create(name, member, expiry):
     """Create group membership.
 
     Args:
@@ -188,6 +219,7 @@ def memberships_create(service, name=None, member=None, expiry=None):
         expiry: unix timestamp or parsable time string (i.e. Nov 30 2019)
     Returns: Membership resource.
     """
+    service = build_service()
     # Build lookup group query
     try:
         membership = {"name":"", "preferred_member_key": {"id": member}, "roles": [{"name": "MEMBER"}]}
@@ -199,19 +231,16 @@ def memberships_create(service, name=None, member=None, expiry=None):
             }
         response = service.groups().memberships().create(
                 parent=name, body=membership).execute()
-        member = memberships_get(service, name=response['response']['name'])
-        return member
+        member = [service.groups().memberships().get(
+                name=response['response']['name']).execute()]
+        render(member)
     except Exception as e:
-        return e
+        render(e)
 
-def get_expiry(expiry):
-    """Convenience function to be able to parse a string into a timestamp"""
-    if(re.search("^[0-9]+$", expiry)):
-        return expiry
-    else:
-        return parse(expiry).strftime("%s")
-
-def membership_expire(service, name=None, member=None, expiry=None):
+@click.command('memberships.expire')
+@click.option('--name', required=True, help='The unique name identifier for the membership. (This is the full name i.e. groups/abc123/memmberships/789xyz)')
+@click.option('--expiry', required=False, help='Expiration date/time for the membership as either a Unix timestamp or date string in the format "Nov 30 2019 23:59:59".')
+def memberships_expire(name, expiry):
     """Set an expiration on a membership.
 
     Args:
@@ -221,6 +250,7 @@ def membership_expire(service, name=None, member=None, expiry=None):
         expiry: unix timestamp or parsable time string (i.e. Nov 30 2019)
     Returns: Membership resource.
     """
+    service = build_service()
     # Build lookup group query
     try:
         membership = {"expiry_detail": {
@@ -232,9 +262,19 @@ def membership_expire(service, name=None, member=None, expiry=None):
                 name=name, body=membership)
         request.uri += "&updateMask=expiryDetail.expireTime"
         response = request.execute()
-        return response
+        member = [service.groups().memberships().get(
+                name=name).execute()]
+        render(member)
     except Exception as e:
-        return e
+        render(e)
+
+def get_expiry(expiry):
+    """Convenience function to be able to parse a string into a timestamp"""
+    if(re.search("^[0-9]+$", expiry)):
+        return expiry
+    else:
+        return parse(expiry).strftime("%s")
+
 
 def render(*args):
     """Takes a list of dictionaries and prints them out in a table"""
@@ -257,81 +297,17 @@ def render_exception(e):
     if(hasattr(e, 'content')):
         print(json.dumps(json.loads(e.content), indent=4, sort_keys=True))
 
-
+@click.group()
 def main():
-    """Main program"""
-    # set up parsing of command line params
-    parser = argparse.ArgumentParser(description='Command line tool to use the Cloud Identity Groups API.')
-    parser.add_argument('command', type=str, metavar='C', nargs=1, help='Command to execute, one of (groups.create, groups.list, groups.get, memberships.create, memberships.list, memberships.expire)', choices=['groups.list','groups.get', 'groups.create', 'memberships.list', 'memberships.create', 'memberships.expire'])
-    parser.add_argument('--customer', help='Your customer id')
-    parser.add_argument('--name', help='Group name for get or update')
-    parser.add_argument('--displayName', help='Display name when creating a group')
-    parser.add_argument('--description', help='Description name when creating a group')
-    parser.add_argument('--member', help='Member (email address)')
-    parser.add_argument('--expiry', help='Member expiration')
-    parser.add_argument('--key', help='Group key (email address) for get or update')
-    parser.add_argument('--count', help='Number of groups to return')
-    args = parser.parse_args()
+    pass
 
-    # build the service which will be passed in to all functions to make an API call
-    service = build_service('oauth_tokens.json', 'client_secrets.json')
-
-    # handle each of the commands
-    if(args.command[0] == 'groups.list'):
-        if(args.customer):
-            count = 10
-            if(args.count):
-                count = args.count
-            groups = groups_list(service, args.customer, count, "BASIC")
-            render(groups)
-            return
-        else:
-            print("Please pass your customer id `--customer C03n72mjq`")
-    elif(args.command[0] == 'groups.get'):
-        if(args.name):
-            group = groups_get(service, name=args.name)
-            render(group)
-            return
-        elif(args.key):
-            group = groups_get(service, key=args.key)
-            render(group)
-            return
-        else:
-            print("Please pass the group name `--name groups/041mghml1gu72pq` or `--id groupkey@domain.com`")
-            return
-    elif(args.command[0] == 'groups.create'):
-        if(args.customer and args.key):
-            group = groups_create(service, args.customer, args.key, display_name=args.displayName, description=args.description)
-            render(group)
-            return
-        else:
-            print("Please pass a customer `--customer C03n72mjq` and group key `--key groupkey@domain.com`")
-            return
-    elif(args.command[0] == 'memberships.list'):
-        if(args.name):
-            members = memberships_list(service, name=args.name)
-            render(members)
-            return
-        else:
-            print("Please pass the group name `--name groups/041mghml1gu72pq` or `--id groupkey@domain.com`")
-            return
-    elif(args.command[0] == 'memberships.expire'):
-        if(args.name and args.member):
-            members = membership_expire(service, name=args.name, member=args.member, expiry=args.expiry)
-            render(members)
-            return
-        else:
-            print("Please pass the group name `--name groups/041mghml1gu72pq` or `--id groupkey@domain.com` and the member to be added `--member user@domain.com`")
-            return
-    elif(args.command[0] == 'memberships.create'):
-        if(args.name):
-            members = memberships_create(service, name=args.name, member=args.member, expiry=args.expiry)
-            render(members)
-            return
-        else:
-            print("Please pass the group name `--name groups/041mghml1gu72pq` or `--id groupkey@domain.com`")
-            return
-    return
+main.add_command(groups_create)
+main.add_command(groups_get)
+main.add_command(groups_list)
+main.add_command(memberships_list)
+main.add_command(memberships_get)
+main.add_command(memberships_create)
+main.add_command(memberships_expire)
 
 if __name__ == "__main__":
     main()
