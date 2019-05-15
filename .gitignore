@@ -1,5 +1,7 @@
 client_secret_oauth.json
 api_key.txt
 token.json
+service_account_credentials.json
+delegated_email.txt
 env/**
 __pycache__/**

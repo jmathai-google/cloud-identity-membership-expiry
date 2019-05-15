@@ -14,6 +14,7 @@ from googleapiclient.discovery import build
 from httplib2 import Http
 from six.moves.urllib.parse import urlencode
 from oauth2client import file, client, tools
+from google.oauth2 import service_account
 
 
 # Cloud identity groups api scope
@@ -27,24 +28,42 @@ CLIENT_SECRET_OAUTH = "{}/client_secret_oauth.json".format(
 TOKEN = "{}/token.json".format(
                             os.path.dirname(os.path.realpath(__file__))
                         )
+SERVICE_ACCOUNT_CREDENTIALS = "{}/service_account_credentials.json".format(
+                            os.path.dirname(os.path.realpath(__file__))
+                        )
+DELEGATED_EMAIL = "{}/delegated_email.txt".format(
+                            os.path.dirname(os.path.realpath(__file__))
+                        )
+
 
 def build_service():
     """ Build service object to make calls to the Cloud Identity API using its
         Discovery URL """
     if(not os.path.exists(API_KEY_FILE)):
         exit("Please create a file with your API key at {}".format(API_KEY_FILE))
-    if(not os.path.exists(CLIENT_SECRET_OAUTH)):
-        exit("Please download your Oauth client file (client_secret_oauth.json).")
-    if(not os.path.exists(TOKEN)):
-        exit("Please run login.py to set up authentication")
 
-    # store the API key
+    # open/read the API key
     with open(API_KEY_FILE) as key_file:
-        api_key = key_file.read()
+        api_key = key_file.read().strip()
+    
+    # if service account credentials are found then use them
+    # else look for oauth tokens
+    if(os.path.exists(SERVICE_ACCOUNT_CREDENTIALS) and os.path.exists(DELEGATED_EMAIL)):
+        credentials_without_domain_wide_delegation = service_account.Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_CREDENTIALS, scopes=SCOPES)
 
-    # get the token if it exists and rely on login.py to create token.json
-    store = file.Storage(TOKEN)
-    credentials = store.get()
+        with open(DELEGATED_EMAIL) as email_file:
+            delegated_email = email_file.read().strip()
+        credentials = credentials_without_domain_wide_delegation.with_subject(delegated_email)
+    else:
+        if(not os.path.exists(CLIENT_SECRET_OAUTH)):
+            exit("Please download your Oauth client file (client_secret_oauth.json).")
+        if(not os.path.exists(TOKEN)):
+            exit("Please run login.py to set up authentication")
+
+        # get the token if it exists and rely on login.py to create token.json
+        store = file.Storage(TOKEN)
+        credentials = store.get()
 
     service_name = "cloudidentity.googleapis.com"
     api_name = "cloudidentity"
